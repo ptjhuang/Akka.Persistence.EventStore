@@ -8,8 +8,17 @@
             public const string PersistenceId = "persistenceId";
             public const string Manifest = "manifest";
             public const string OccurredOn = "occurredOn";
+            /// <summary>
+            /// <see cref="IPersistentRepresentation.Sender"/>
+            /// </summary>
             public const string SenderPath = "senderPath";
+            /// <summary>
+            /// <see cref="IPersistentRepresentation.SequenceNr"/>
+            /// </summary>
             public const string SequenceNr = "sequenceNr";
+            /// <summary>
+            /// <see cref="IPersistentRepresentation.WriterGuid"/>
+            /// </summary>
             public const string WriterGuid = "writerGuid";
             public const string Timestamp = "timestamp";
             public const string JournalType = "journalType";
