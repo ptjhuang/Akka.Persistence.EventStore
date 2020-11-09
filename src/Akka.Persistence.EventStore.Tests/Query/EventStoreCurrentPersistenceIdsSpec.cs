@@ -8,11 +8,14 @@ using Akka.Streams.TestKit;
 using Akka.Util.Internal;
 using Xunit;
 using Xunit.Abstractions;
+using System.Threading.Tasks;
 
 namespace Akka.Persistence.EventStore.Tests.Query
 {
-    public class EventStoreCurrentPersistenceIdsSpec : CurrentPersistenceIdsSpec, IClassFixture<DatabaseFixture>
+    public class EventStoreCurrentPersistenceIdsSpec : CurrentPersistenceIdsSpec, IClassFixture<DatabaseFixture>, IAsyncLifetime
     {
+        private readonly DatabaseFixture _databaseFixture;
+
         private static Config Config(DatabaseFixture databaseFixture)
         {
             return ConfigurationFactory.ParseString($@"
@@ -28,11 +31,23 @@ namespace Akka.Persistence.EventStore.Tests.Query
         }
 
         public EventStoreCurrentPersistenceIdsSpec(DatabaseFixture databaseFixture, ITestOutputHelper output) : 
-                base(Config(databaseFixture.Restart()), nameof(EventStoreCurrentPersistenceIdsSpec), output)
+                base(Config(databaseFixture), nameof(EventStoreCurrentPersistenceIdsSpec), output)
         {
             ReadJournal = Sys.ReadJournalFor<EventStoreReadJournal>(EventStoreReadJournal.Identifier);
+            _databaseFixture = databaseFixture;
         }
 
+        public async Task InitializeAsync()
+        {
+            await _databaseFixture.Restart();
+        }
+
+        public Task DisposeAsync()
+        {
+            return Task.CompletedTask;
+        }
+
+        [Fact]
         public override void ReadJournal_query_CurrentPersistenceIds_should_not_see_new_events_after_complete()
         {
             var queries = ReadJournal.AsInstanceOf<ICurrentPersistenceIdsQuery>();
@@ -44,19 +59,18 @@ namespace Akka.Persistence.EventStore.Tests.Query
             var greenSrc = queries.CurrentPersistenceIds();
             var probe = greenSrc.RunWith(this.SinkProbe<string>(), Materializer);
             probe.Request(2)
-                 .ExpectNext("a")
-                 .ExpectNext("b")
-                 .ExpectNoMsg(TimeSpan.FromMilliseconds(100));
+                .ExpectNext("a")
+                .ExpectNext("b")
+                .ExpectNoMsg(TimeSpan.FromMilliseconds(100));
 
             Setup("d", 1);
 
             probe.ExpectNoMsg(TimeSpan.FromMilliseconds(100));
             probe.Request(5)
-                 .ExpectNext("c")
-                 .ExpectNext("d")
-                 .ExpectComplete();
+                .ExpectNext("c")
+                .ExpectComplete();
         }
-        
+
         private IActorRef Setup(string persistenceId, int n)
         {
             var pref = Sys.ActorOf(Query.TestActor.Props(persistenceId));

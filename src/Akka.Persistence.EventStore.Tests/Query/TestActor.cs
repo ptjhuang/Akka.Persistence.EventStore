@@ -33,7 +33,14 @@ namespace Akka.Persistence.EventStore.Tests.Query
             {
                 case DeleteCommand delete:
                     DeleteMessages(delete.ToSequenceNr);
-                    Sender.Tell($"{delete.ToSequenceNr}-deleted");
+                    var requester = Sender;
+                    BecomeStacked(msg => msg.Match()
+                        .With<DeleteMessagesSuccess>(_ =>
+                        {
+                            requester.Tell($"{delete.ToSequenceNr}-deleted");
+                            UnbecomeStacked();
+                        })
+                        .Default(_ => requester.Tell($"{delete.ToSequenceNr}-delete failed")));
                     break;
                 case string cmd:
                     var sender = Sender;

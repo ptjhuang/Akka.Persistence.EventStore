@@ -1,7 +1,7 @@
 ﻿using Akka.Actor;
 using Akka.Persistence.Journal;
 using Akka.Serialization;
-using EventStore.ClientAPI;
+using EventStore.Client;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
@@ -43,7 +43,7 @@ namespace Akka.Persistence.EventStore
             var metadataString = JsonConvert.SerializeObject(metadata, _metadataSettings);
             var metadataBytes = Encoding.UTF8.GetBytes(metadataString);
 
-            return new EventData(Guid.NewGuid(), type, isJson, dataBytes, metadataBytes);
+            return new EventData(Uuid.NewUuid(), type, dataBytes, metadataBytes);
         }
 
         /// <summary>
@@ -76,7 +76,7 @@ namespace Akka.Persistence.EventStore
         {
             var eventData = resolvedEvent.Event;
 
-            var metadataString = Encoding.UTF8.GetString(eventData.Metadata);
+            var metadataString = Encoding.UTF8.GetString(eventData.Metadata.ToArray());
             var metadata = JsonConvert.DeserializeObject<JObject>(metadataString, _metadataSettings);
 
             var journalType = (string)metadata.SelectToken(Constants.EventMetadata.JournalType);
@@ -102,7 +102,7 @@ namespace Akka.Persistence.EventStore
             }
 
             return new Persistent(
-                ToEvent(resolvedEvent.Event.Data, metadata),
+                ToEvent(resolvedEvent.Event.Data.ToArray(), metadata),
                 sequenceNr,
                 persistenceId,
                 manifest,

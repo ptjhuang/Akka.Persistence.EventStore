@@ -3,7 +3,7 @@ using System.Reflection;
 using System.Text;
 using Akka.Actor;
 using Akka.Serialization;
-using EventStore.ClientAPI;
+using EventStore.Client;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -39,14 +39,14 @@ namespace Akka.Persistence.EventStore
             var metadataString = JsonConvert.SerializeObject(metadata, _settings);
             var metadataBytes = Encoding.UTF8.GetBytes(metadataString);
 
-            return new EventData(Guid.NewGuid(), type, isJson, dataBytes, metadataBytes);
+            return new EventData(Uuid.NewUuid(), type, dataBytes, metadataBytes);
         }
 
         public SelectedSnapshot Adapt(ResolvedEvent resolvedEvent)
         {
             var eventData = resolvedEvent.Event;
 
-            var metadataString = Encoding.UTF8.GetString(eventData.Metadata);
+            var metadataString = Encoding.UTF8.GetString(eventData.Metadata.ToArray());
             var metadata = JsonConvert.DeserializeObject<JObject>(metadataString, _settings);
             var stream = (string) metadata.SelectToken(Constants.EventMetadata.PersistenceId);
             var sequenceNr = (long) metadata.SelectToken(Constants.EventMetadata.SequenceNr);
@@ -54,7 +54,7 @@ namespace Akka.Persistence.EventStore
              
             var timestamp = metadata.Value<DateTime>(Constants.EventMetadata.Timestamp);
 
-            var @event = ToEvent(resolvedEvent.Event.Data, metadata);
+            var @event = ToEvent(resolvedEvent.Event.Data.ToArray(), metadata);
 
             
             var snapshotMetadata = new SnapshotMetadata(stream, sequenceNr, timestamp);

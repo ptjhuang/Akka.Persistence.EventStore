@@ -1,5 +1,5 @@
 ﻿using Akka.Actor;
-using EventStore.ClientAPI;
+using EventStore.Client;
 using System;
 
 namespace Akka.Persistence.EventStore

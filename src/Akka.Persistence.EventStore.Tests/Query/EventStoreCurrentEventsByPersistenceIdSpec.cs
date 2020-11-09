@@ -107,7 +107,7 @@ namespace Akka.Persistence.EventStore.Tests.Query
             var pref = Setup("g2");
 
             pref.Tell(new TestActor.DeleteCommand(3));
-            AwaitAssert(() => ExpectMsg("3-deleted"));
+            ExpectMsg("3-deleted");
 
             var src = queries.CurrentEventsByPersistenceId("g2", 0, 0);
             src.Select(x => x.Event).RunWith(this.SinkProbe<object>(), Materializer).Request(1).ExpectComplete();
@@ -121,7 +121,7 @@ namespace Akka.Persistence.EventStore.Tests.Query
             var pref = Setup("h");
 
             pref.Tell(new TestActor.DeleteCommand(2));
-            AwaitAssert(() => ExpectMsg("2-deleted"));
+            ExpectMsg("2-deleted");
 
             var src = queries.CurrentEventsByPersistenceId("h", 0L, long.MaxValue);
             src.Select(x => x.Event).RunWith(this.SinkProbe<object>(), Materializer)

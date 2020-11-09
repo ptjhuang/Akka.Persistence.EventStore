@@ -1,10 +1,9 @@
-using System;
-using System.Linq;
-using System.Runtime.CompilerServices;
-using System.Threading.Tasks;
 using Akka.Event;
 using Akka.Persistence.Snapshot;
-using EventStore.ClientAPI;
+using EventStore.Client;
+using System;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace Akka.Persistence.EventStore.Snapshot
 {
@@ -18,7 +17,7 @@ namespace Akka.Persistence.EventStore.Snapshot
             public static SelectedSnapshotResult Empty => new SelectedSnapshotResult();
         }
 
-        private IEventStoreConnection _conn;
+        private EventStoreClient _conn;
         private ISnapshotAdapter _snapshotAdapter;
         private readonly EventStoreSnapshotSettings _settings;
 
@@ -36,10 +35,8 @@ namespace Akka.Persistence.EventStore.Snapshot
         {
             base.PreStart();
             var connectionString = _settings.ConnectionString;
-            var connectionName = _settings.ConnectionName;
-            _conn = EventStoreConnection.Create(connectionString, connectionName);
+            _conn = new EventStoreClient(EventStoreClientSettings.Create(connectionString));
 
-            _conn.ConnectAsync().Wait();
             _snapshotAdapter = BuildDefaultSnapshotAdapter();
         }
 
@@ -60,14 +57,11 @@ namespace Akka.Persistence.EventStore.Snapshot
                 return result.Snapshot;
             }
 
-            var slice = await _conn.ReadStreamEventsBackwardAsync(streamName, StreamPosition.End, 1, false);
-
-            if (slice == null || slice.Status != SliceReadStatus.Success || !slice.Events.Any())
-            {
-                return null;
-            }
-
-            return slice.Events.Select(_snapshotAdapter.Adapt).First();
+            var slice = _conn.ReadStreamAsync(Direction.Backwards, streamName, StreamPosition.End, 1, resolveLinkTos: false);
+            if (await slice.ReadState == ReadState.StreamNotFound) return null;
+            
+            var snapshot = await slice.FirstOrDefaultAsync();
+            return _snapshotAdapter.Adapt(snapshot);
         }
 
         protected override async Task SaveAsync(SnapshotMetadata metadata, object snapshot)
@@ -77,8 +71,8 @@ namespace Akka.Persistence.EventStore.Snapshot
             {
                 var writeResult = await _conn.AppendToStreamAsync(
                     streamName,
-                    ExpectedVersion.Any,
-                    _snapshotAdapter.Adapt(metadata, snapshot)
+                    StreamState.Any,
+                    new[] { _snapshotAdapter.Adapt(metadata, snapshot) }
                 );
                 _log.Debug(
                     "Snapshot for `{0}` committed at log position (commit: {1}, prepare: {2})",
@@ -101,12 +95,11 @@ namespace Akka.Persistence.EventStore.Snapshot
         {
             var streamName = GetStreamName(metadata.PersistenceId);
             var m = await _conn.GetStreamMetadataAsync(streamName);
-            if (m.IsStreamDeleted)
+            if (m.StreamDeleted)
             {
                 return;
             }
 
-            var streamMetadata = m.StreamMetadata.Copy();
             var timestamp = metadata.Timestamp != DateTime.MinValue ? metadata.Timestamp : default(DateTime?);
 
             var result = await FindSnapshot(streamName, metadata.SequenceNr, timestamp);
@@ -116,28 +109,23 @@ namespace Akka.Persistence.EventStore.Snapshot
                 return;
             }
 
-
-            streamMetadata = streamMetadata.SetTruncateBefore(result.EventNumber + 1);
-            await _conn.SetStreamMetadataAsync(streamName, ExpectedVersion.Any, streamMetadata.Build());
+            await TruncateStream(streamName, StreamPosition.FromInt64(result.EventNumber + 1), m.Metadata);
         }
+
+        
 
         protected override async Task DeleteAsync(string persistenceId, SnapshotSelectionCriteria criteria)
         {
             var streamName = GetStreamName(persistenceId);
             var m = await _conn.GetStreamMetadataAsync(streamName);
-            var streamMetadata = m.StreamMetadata.Copy();
-
-
+            
             if (criteria.Equals(SnapshotSelectionCriteria.Latest))
             {
-                var slice = await _conn.ReadStreamEventsBackwardAsync(streamName, StreamPosition.End, 1, false);
-                if (slice.Events.Any())
+                var @event = await _conn.ReadStreamAsync(Direction.Backwards, streamName, StreamPosition.End, 1, resolveLinkTos: false).FirstOrDefaultAsync();
+                if (@event.Event != null)
                 {
-                    var @event = slice.Events.First();
                     var highestEventPosition = @event.OriginalEventNumber;
-                    streamMetadata = streamMetadata
-                            .SetTruncateBefore(highestEventPosition);
-                    await _conn.SetStreamMetadataAsync(streamName, ExpectedVersion.Any, streamMetadata.Build());
+                    await TruncateStream(streamName, highestEventPosition, m.Metadata);
                 }
             }
             else if (!criteria.Equals(SnapshotSelectionCriteria.None))
@@ -151,8 +139,7 @@ namespace Akka.Persistence.EventStore.Snapshot
                     return;
                 }
 
-                streamMetadata = streamMetadata.SetTruncateBefore(result.EventNumber + 1);
-                await _conn.SetStreamMetadataAsync(streamName, ExpectedVersion.Any, streamMetadata.Build());
+                await TruncateStream(streamName, StreamPosition.FromInt64(result.EventNumber + 1), m.Metadata);
             }
         }
 
@@ -203,42 +190,37 @@ namespace Akka.Persistence.EventStore.Snapshot
         private async Task<SelectedSnapshotResult> FindSnapshot(string streamName, long maxSequenceNr,
             DateTime? maxTimeStamp)
         {
-            SelectedSnapshotResult snapshot = null;
+            var result = await _conn
+                .ReadStreamAsync(Direction.Backwards, streamName, StreamPosition.End, resolveLinkTos: false)
+                .Select(e => new SelectedSnapshotResult
+                {
+                    EventNumber = e.OriginalEventNumber.ToInt64(),
+                    Snapshot = _snapshotAdapter.Adapt(e)
+                })
+                .FirstOrDefaultAsync(s =>
+                    (!maxTimeStamp.HasValue ||
+                        s.Snapshot.Metadata.Timestamp <= maxTimeStamp.Value) &&
+                    s.Snapshot.Metadata.SequenceNr <= maxSequenceNr);
 
-            var slice = await _conn.ReadStreamEventsBackwardAsync(streamName, StreamPosition.End, 1, false);
-            if (slice.Status != SliceReadStatus.Success)
-            {
-                return SelectedSnapshotResult.Empty;
-            }
-
-            var from = slice.LastEventNumber;
-            var take = _settings.ReadBatchSize;
-            do
-            {
-                if (from <= 0) break;
-
-                take = from > take ? take : (int) from;
-                slice = await _conn.ReadStreamEventsBackwardAsync(streamName, from, from == 0 ? 1 : take, false);
-                from -= take;
-
-                snapshot = slice.Events
-                                .Select(e => new SelectedSnapshotResult
-                                {
-                                    EventNumber = e.OriginalEventNumber,
-                                    Snapshot = _snapshotAdapter.Adapt(e)
-                                })
-                                .FirstOrDefault(s =>
-                                        (!maxTimeStamp.HasValue ||
-                                         s.Snapshot.Metadata.Timestamp <= maxTimeStamp.Value) &&
-                                        s.Snapshot.Metadata.SequenceNr <= maxSequenceNr);
-            } while (snapshot == null && slice.Status == SliceReadStatus.Success);
-
-            return snapshot ?? SelectedSnapshotResult.Empty;
+            return result ?? SelectedSnapshotResult.Empty;
         }
 
         private string GetStreamName(string persistenceId)
         {
             return $"{_settings.Prefix}{persistenceId}";
+        }
+
+
+        private async Task TruncateStream(string streamName, StreamPosition truncateBefore, StreamMetadata original)
+        {
+            var streamMetadata = new StreamMetadata(
+                            original.MaxCount,
+                            original.MaxAge,
+                            truncateBefore,
+                            original.CacheControl,
+                            original.Acl,
+                            original.CustomMetadata);
+            await _conn.SetStreamMetadataAsync(streamName, StreamState.Any, streamMetadata);
         }
     }
 }

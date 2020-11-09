@@ -10,14 +10,17 @@ using Akka.Streams.TestKit;
 using Akka.Util.Internal;
 using Xunit;
 using Xunit.Abstractions;
+using System.Threading.Tasks;
 
 namespace Akka.Persistence.EventStore.Tests.Query
 {
-    public class EventStoreEventsByPersistenceIdSpec : Akka.TestKit.Xunit2.TestKit, IClassFixture<DatabaseFixture>
+    public class EventStoreEventsByPersistenceIdSpec : Akka.TestKit.Xunit2.TestKit, IClassFixture<DatabaseFixture>, IAsyncLifetime
     {
         private ActorMaterializer Materializer { get; }
 
         private IReadJournal ReadJournal { get; set; }
+
+        private readonly DatabaseFixture _databaseFixture;
 
         private static Config Config(DatabaseFixture databaseFixture)
         {
@@ -38,6 +41,17 @@ namespace Akka.Persistence.EventStore.Tests.Query
         {
             Materializer = Sys.Materializer();
             ReadJournal = Sys.ReadJournalFor<EventStoreReadJournal>(EventStoreReadJournal.Identifier);
+            _databaseFixture = databaseFixture;
+        }
+
+        public async Task InitializeAsync()
+        {
+            await _databaseFixture.Restart();
+        }
+
+        public Task DisposeAsync()
+        {
+            return Task.CompletedTask;
         }
 
         [Fact]
@@ -60,7 +74,7 @@ namespace Akka.Persistence.EventStore.Tests.Query
             pref.Tell("c-4");
             ExpectMsg("c-4-done");
 
-            probe.ExpectNext("c-4");
+            AwaitAssert(() => probe.ExpectNext("c-4"));
         }
 
         [Fact]

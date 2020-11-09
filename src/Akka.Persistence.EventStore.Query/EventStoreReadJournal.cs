@@ -1,11 +1,14 @@
-﻿using System;
-using Akka.Actor;
+﻿using Akka.Actor;
 using Akka.Configuration;
-using Akka.Persistence.EventStore.Query.Publishers;
+using Akka.Persistence.EventStore.Journal;
 using Akka.Persistence.Journal;
 using Akka.Persistence.Query;
 using Akka.Streams.Dsl;
-using EventStore.ClientAPI;
+using EventStore.Client;
+using System;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Akka.Persistence.EventStore.Query
 {
@@ -24,16 +27,22 @@ namespace Akka.Persistence.EventStore.Query
         public const string Identifier = "akka.persistence.query.journal.eventstore";
 
         private readonly string _writeJournalPluginId;
-        private readonly int _maxBufferSize;
-        private readonly bool _autoAck;
+        private readonly IActorRef _journalRef;
+        private readonly Func<EventStoreClient> _esdbClientFactory;
+        private readonly EventStoreJournalSettings _settings;
+        private readonly IEventAdapter _eventAdapter;
 
 
         /// <inheritdoc />
         public EventStoreReadJournal(ExtendedActorSystem system, Config config)
         {
             _writeJournalPluginId = config.GetString("write-plugin");
-            _maxBufferSize = config.GetInt("max-buffer-size");
-            _autoAck = config.GetBoolean("auto-ack");
+
+            _journalRef = Persistence.Instance.Apply(system).JournalFor(_writeJournalPluginId);
+            var result = _journalRef.Ask<GetJournalConfigResult>(new GetJournalConfig()).Result;
+            _settings = result.Settings;
+            _eventAdapter = result.EventAdapter;
+            _esdbClientFactory = () => new EventStoreClient(EventStoreClientSettings.Create(_settings.ConnectionString));
         }
 
         /// <summary>
@@ -58,24 +67,18 @@ namespace Akka.Persistence.EventStore.Query
         /// *Please note*, to use this feature, you need to enable `$streams` built-in projection in EventStore server. Please refer to
         /// EventStore server documentation to find out how.
         /// </summary>
-        public Source<string, NotUsed> PersistenceIds()
-        {
-            var publisherProps = AllPersistenceIdsPublisher.Props(true, _writeJournalPluginId);
-            return Source
-                   .ActorPublisher<string>(publisherProps)
-                   .MapMaterializedValue(_ => NotUsed.Instance)
-                   .Named("AllPersistenceIds");
-        }
+        public Source<string, NotUsed> PersistenceIds() => GetEventsByStreamId("$streams", null, null, true)
+            .Select(env => env.PersistenceId)
+            .Named("AllPersistenceIds");
 
         /// <summary>
         /// Same type of query as <see cref="PersistenceIds"/> but the stream
         /// is completed immediately when it reaches the end of the "result set". Persistent
         /// actors that are created after the query is completed are not included in the stream.
         /// </summary>
-        public Source<string, NotUsed> CurrentPersistenceIds() =>
-                Source.ActorPublisher<string>(AllPersistenceIdsPublisher.Props(false, _writeJournalPluginId))
-                      .MapMaterializedValue(_ => NotUsed.Instance)
-                      .Named("CurrentPersistenceIds");
+        public Source<string, NotUsed> CurrentPersistenceIds() => GetEventsByStreamId("$streams", null, null, false)
+            .Select(env => env.PersistenceId)
+            .Named("CurrentPersistenceIds");
 
         /// <summary>
         /// <see cref="EventsByPersistenceId"/> is used for retrieving events for a specific
@@ -106,17 +109,9 @@ namespace Akka.Persistence.EventStore.Query
         public Source<EventEnvelope, NotUsed> EventsByPersistenceId(string persistenceId, long fromSequenceNr,
             long toSequenceNr)
         {
-            var props = EventsByPersistenceIdPublisher.Props(
-                persistenceId,
-                fromSequenceNr,
-                toSequenceNr,
-                _maxBufferSize,
-                _writeJournalPluginId,
-                true
-            );
-            return Source.ActorPublisher<EventEnvelope>(props)
-                         .MapMaterializedValue(_ => NotUsed.Instance)
-                         .Named("EventsByPersistenceId-" + persistenceId);
+            return GetEventsByStreamId(persistenceId, fromSequenceNr, toSequenceNr, true)
+                .MapMaterializedValue(_ => NotUsed.Instance)
+                .Named("EventsByPersistenceId-" + persistenceId);
         }
 
 
@@ -129,17 +124,9 @@ namespace Akka.Persistence.EventStore.Query
             string persistenceId, long fromSequenceNr, long toSequenceNr
         )
         {
-            var props = EventsByPersistenceIdPublisher.Props(
-                persistenceId,
-                fromSequenceNr,
-                toSequenceNr,
-                _maxBufferSize,
-                _writeJournalPluginId,
-                false
-            );
-            return Source.ActorPublisher<EventEnvelope>(props)
-                         .MapMaterializedValue(_ => NotUsed.Instance)
-                         .Named("CurrentEventsByPersistenceId-" + persistenceId);
+            return GetEventsByStreamId(persistenceId, fromSequenceNr, toSequenceNr, false)
+                .MapMaterializedValue(_ => NotUsed.Instance)
+                .Named("CurrentEventsByPersistenceId-" + persistenceId);
         }
 
         /// <summary>
@@ -183,15 +170,15 @@ namespace Akka.Persistence.EventStore.Query
         /// </summary>
         public Source<EventEnvelope, NotUsed> EventsByTag(string tag, Offset offset = null)
         {
-            offset = offset ?? new Sequence(StreamPosition.Start);
+            offset = offset ?? NoOffset.Instance;
             switch (offset)
             {
                 case Sequence seq:
-                    return GetCurrentEventsByTag(tag, seq.Value, true);
+                    return GetEventsByStreamId(tag, seq.Value + 1, null, true);
                 case NoOffset _:
-                    return GetCurrentEventsByTag(tag, null, true);
+                    return GetEventsByStreamId(tag, null, null, true);
                 default:
-                    throw new ArgumentException($"SqlReadJournal does not support {offset.GetType().Name} offsets");
+                    throw new ArgumentException($"EventStoreReadJournal does not support {offset.GetType().Name} offsets");
             }
         }
 
@@ -200,34 +187,105 @@ namespace Akka.Persistence.EventStore.Query
         /// is completed immediately when it reaches the end of the "result set". Events that are
         /// stored after the query is completed are not included in the event stream.
         /// </summary>
+        /// <param name="tag"></param>
         /// <param name="offset">Zero-based Akka index</param>
         public Source<EventEnvelope, NotUsed> CurrentEventsByTag(string tag, Offset offset = null)
         {
-            offset = offset ?? Offset.NoOffset();
+            offset = offset ?? NoOffset.Instance;
             switch (offset)
             {
                 case Sequence seq:
-                    return GetCurrentEventsByTag(tag, seq.Value, false);
+                    return GetEventsByStreamId(tag, seq.Value + 1, null, false);
                 case NoOffset _:
-                    return GetCurrentEventsByTag(tag, null, false);
+                    return GetEventsByStreamId(tag, null, null, false);
                 default:
-                    throw new ArgumentException($"SqlReadJournal does not support {offset.GetType().Name} offsets");
+                    throw new ArgumentException($"EventStoreReadJournal does not support {offset.GetType().Name} offsets");
             }
         }
 
-        private Source<EventEnvelope, NotUsed> GetCurrentEventsByTag(string tag, long? offset, bool isLive)
+
+        /// <summary>
+        /// GetEventsByStreamId
+        /// </summary>
+        /// <param name="streamId"></param>
+        /// <param name="fromOffset">Inclusive start</param>
+        /// <param name="toOffset">Exclusive offset</param>
+        /// <param name="isLive"></param>
+        /// <returns></returns>
+        private Source<EventEnvelope, NotUsed> GetEventsByStreamId(string streamId, long? fromOffset, long? toOffset, bool isLive)
         {
-            var props = EventsByTagPublisher.Props(
-                                    tag,
-                                    isLive,
-                                    offset,
-                                    long.MaxValue,
-                                    _maxBufferSize,
-                                    _writeJournalPluginId
-                                );
-            return Source.ActorPublisher<EventEnvelope>(props)
-                         .MapMaterializedValue(_ => NotUsed.Instance)
-                         .Named($"CurrentEventsByTag-{tag}");
+            if (fromOffset == toOffset && fromOffset != null && toOffset != null) return Source.Empty<EventEnvelope>();
+
+            var esdbClient = _esdbClientFactory();
+
+            if (!isLive)
+            {
+                // Non-live subscription
+                var startFrom = getStartPosFromInt64(fromOffset);
+                var count = toOffset == null || toOffset == long.MaxValue ? long.MaxValue :
+                    (toOffset.Value - (fromOffset == null ? 0 : fromOffset.Value));
+                if (count == 0) return Source.Empty<EventEnvelope>();
+                return Source
+                    .FromTask(Task.Run(async () =>
+                    {
+                        var result = esdbClient.ReadStreamAsync(Direction.Forwards, streamId, startFrom, count, resolveLinkTos: true);
+                        if ((await result.ReadState) == ReadState.StreamNotFound)
+                            return AsyncEnumerable.Empty<ResolvedEvent>();
+                        else
+                            return result;
+                    }))
+                    .Select(ae => ae.AsStreamSource())
+                    .ConcatMany(t => t)
+                    .Select(ToEnvelope)
+                    .Where(t => t.envelope != null)
+                    .Select(t => t.envelope);
+            }
+            else
+            {
+                // LIVE subscription
+                return FirehoseSource.Of<EventEnvelope>(async args =>
+                {
+                    var startFrom = getStartPosFromInt64(args.Start);
+                    return startFrom == StreamPosition.Start
+                        ? await esdbClient.SubscribeToStreamAsync(streamId,
+                            eventAppeared,
+                            resolveLinkTos: true,
+                            subscriptionDropped)
+                        : await esdbClient.SubscribeToStreamAsync(streamId, startFrom,
+                            eventAppeared,
+                            resolveLinkTos: true,
+                            subscriptionDropped);
+
+                    Task eventAppeared(StreamSubscription subscription, ResolvedEvent @event, CancellationToken token)
+                    {
+                        var (envelope, position) = ToEnvelope(@event);
+                        if (envelope != null) args.EventAppeared((envelope, position));
+                        return Task.CompletedTask;
+                    }
+
+                    void subscriptionDropped(StreamSubscription subscription, SubscriptionDroppedReason reason, Exception ex)
+                    {
+                        if (reason != SubscriptionDroppedReason.Disposed)
+                            args.Broken(reason.ToString());
+                    }
+
+                })
+                .AsBackpressureSource(fromOffset == null || fromOffset == 0 ? (long?)null : fromOffset - 1, autoRecover: false)
+                .TakeUntil(env => ((Sequence)env.Offset).Value >= (toOffset ?? long.MaxValue) - 1, true);
+            }
+
+            static StreamPosition getStartPosFromInt64(long? start) =>
+                start == null ? StreamPosition.Start : start == Int64.MaxValue ? StreamPosition.End : StreamPosition.FromInt64(start.Value);
+        }
+
+        private (EventEnvelope envelope, long position) ToEnvelope(ResolvedEvent @event)
+        {
+            var position = @event.OriginalEventNumber.ToInt64();
+            var eventOffset = Offset.Sequence(position);
+            var persistentRep = _eventAdapter.Adapt(@event);
+            if (persistentRep == null) return default;
+            var envelope = new EventEnvelope(eventOffset, persistentRep.PersistenceId, persistentRep.SequenceNr, persistentRep.Payload);
+            return (envelope, position);
         }
     }
 }

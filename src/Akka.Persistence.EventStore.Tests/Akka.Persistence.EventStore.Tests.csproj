@@ -1,7 +1,7 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <Import Project="..\common.props" />
   <PropertyGroup>
-    <TargetFramework>netcoreapp2.0</TargetFramework>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
 
     <IsPackable>false</IsPackable>
   </PropertyGroup>
@@ -12,8 +12,9 @@
     <PackageReference Include="xunit" Version="$(XunitVersion)" />
     <PackageReference Include="xunit.runner.visualstudio" Version="$(XunitVersion)" />
     <PackageReference Include="Akka.Persistence.TCK" Version="$(AkkaVersion)" />
+    <PackageReference Include="EventStore.Client.Grpc.ProjectionManagement" Version="$(EventStoreVersion)" />
     <PackageReference Include="FluentAssertions" Version="4.19.4" />
-    <PackageReference Include="Docker.DotNet" Version="3.125.2" />
+    <PackageReference Include="Docker.DotNet" Version="3.125.4" />
   </ItemGroup>
 
   <ItemGroup>

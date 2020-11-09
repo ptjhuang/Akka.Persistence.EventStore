@@ -1,9 +1,10 @@
 ﻿using Akka.Actor;
+using Akka.Dispatch;
 using Akka.Event;
 using Akka.Persistence.EventStore.Query;
 using Akka.Persistence.Journal;
 using Akka.Util.Internal;
-using EventStore.ClientAPI;
+using EventStore.Client;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -16,11 +17,9 @@ namespace Akka.Persistence.EventStore.Journal
     {
         public IStash Stash { get; set; }
 
-        private readonly IEventStoreConnection _connRead;
-        private readonly IEventStoreConnection _conn;
+        private readonly EventStoreClient _conn;
         private IEventAdapter _eventAdapter;
         private readonly EventStoreJournalSettings _settings;
-        private readonly EventStoreSubscriptions _subscriptions;
         private readonly ILoggingAdapter _log;
         private readonly Akka.Serialization.Serialization _serialization;
 
@@ -32,22 +31,12 @@ namespace Akka.Persistence.EventStore.Journal
 
             var connectionString = _settings.ConnectionString;
             var connectionName = _settings.ConnectionName;
-            _connRead = EventStoreConnection
-                    .Create(connectionString, $"{connectionName}.Read");
 
-            _connRead.ConnectAsync().Wait();
+            var settings = EventStoreClientSettings.Create(connectionString);
+            settings.ConnectionName = $"{connectionName}";
+            _conn = new EventStoreClient(settings);
 
-            _conn = EventStoreConnection
-                    .Create(connectionString, connectionName);
-
-            _conn.ConnectAsync()
-                 .PipeTo(
-                     Self,
-                     success: () => new Status.Success("Connected"),
-                     failure: ex => new Status.Failure(ex)
-                 );
-            
-            _subscriptions = new EventStoreSubscriptions(_connRead, Context);
+            Self.Tell(new Status.Success("Connected"));
         }
 
         protected override void PreStart()
@@ -61,7 +50,6 @@ namespace Akka.Persistence.EventStore.Journal
         {
             base.PostStop();
             _conn?.Dispose();
-            _connRead?.Dispose();
         }
 
         private bool AwaitingConnection(object message)
@@ -105,9 +93,9 @@ namespace Akka.Persistence.EventStore.Journal
                 }
 
                 var adapterConstructor = journalAdapterType.GetConstructor(new[] { typeof(Akka.Serialization.Serialization) });
-                
-                IEventAdapter journalAdapter = (adapterConstructor != null 
-                    ? adapterConstructor.Invoke(new object[] { _serialization }) 
+
+                IEventAdapter journalAdapter = (adapterConstructor != null
+                    ? adapterConstructor.Invoke(new object[] { _serialization })
                     : Activator.CreateInstance(journalAdapterType)) as IEventAdapter;
 
                 if (journalAdapter == null)
@@ -130,22 +118,24 @@ namespace Akka.Persistence.EventStore.Journal
         {
             try
             {
-                var slice = await _conn.ReadStreamEventsBackwardAsync(persistenceId, StreamPosition.End, 1, false);
-
                 long sequence = 0;
 
-                if (slice.Events.Any())
+                var result = _conn.ReadStreamAsync(Direction.Backwards, persistenceId, StreamPosition.End, 1, resolveLinkTos: false);
+                if ((await result.ReadState) == ReadState.StreamNotFound) return sequence;
+
+                var @event = await result.FirstOrDefaultAsync();
+
+                if (@event.Event != null)
                 {
-                    var @event = slice.Events.First();
                     var adapted = _eventAdapter.Adapt(@event);
                     sequence = adapted.SequenceNr;
                 }
                 else
                 {
                     var metadata = await _conn.GetStreamMetadataAsync(persistenceId);
-                    if (metadata.StreamMetadata.TruncateBefore != null)
+                    if (metadata.Metadata.TruncateBefore != null)
                     {
-                        sequence = metadata.StreamMetadata.TruncateBefore.Value;
+                        sequence = metadata.Metadata.TruncateBefore.Value.ToInt64();
                     }
                 }
 
@@ -174,7 +164,10 @@ namespace Akka.Persistence.EventStore.Journal
                 {
                     max = 1;
                 }
-
+                if (max == long.MaxValue && toSequenceNr > fromSequenceNr)
+                {
+                    max = toSequenceNr - fromSequenceNr + 1;
+                }
                 if (toSequenceNr > fromSequenceNr && max == toSequenceNr)
                 {
                     max = toSequenceNr - fromSequenceNr + 1;
@@ -183,41 +176,17 @@ namespace Akka.Persistence.EventStore.Journal
                 var count = 0L;
 
                 var start = fromSequenceNr <= 0
-                        ? 0
-                        : fromSequenceNr - 1;
+                        ? StreamPosition.Start
+                        : StreamPosition.Start + (ulong)(fromSequenceNr - 1);
 
-                var localBatchSize = _settings.ReadBatchSize;
-
-                StreamEventsSlice slice;
-                do
-                {
-                    if (max == long.MaxValue && toSequenceNr > fromSequenceNr)
-                    {
-                        max = toSequenceNr - fromSequenceNr + 1;
-                    }
-
-                    if (max < localBatchSize)
-                    {
-                        localBatchSize = (int) max;
-                    }
-
-                    slice = await _conn.ReadStreamEventsForwardAsync(persistenceId, start, localBatchSize, false);
-
-                    foreach (var @event in slice.Events)
+                await _conn.ReadStreamAsync(Direction.Forwards, persistenceId, start, resolveLinkTos: false)
+                    .TakeWhile(_ => count < max)
+                    .ForEachAsync(@event =>
                     {
                         var representation = _eventAdapter.Adapt(@event);
-
                         recoveryCallback(representation);
                         count++;
-
-                        if (count == max)
-                        {
-                            return;
-                        }
-                    }
-
-                    start = slice.NextEventNumber;
-                } while (!slice.IsEndOfStream);
+                    });
             }
             catch (Exception e)
             {
@@ -229,10 +198,10 @@ namespace Akka.Persistence.EventStore.Journal
         protected override async Task<IImmutableList<Exception>> WriteMessagesAsync(
             IEnumerable<AtomicWrite> atomicWrites)
         {
-            var results = new List<Exception>();
+            var results = ImmutableList.Create<Exception>();
             foreach (var atomicWrite in atomicWrites)
             {
-                var persistentMessages = (IImmutableList<IPersistentRepresentation>) atomicWrite.Payload;
+                var persistentMessages = (IImmutableList<IPersistentRepresentation>)atomicWrite.Payload;
 
                 var persistenceId = atomicWrite.PersistenceId;
 
@@ -252,86 +221,53 @@ namespace Akka.Persistence.EventStore.Journal
                         debugData = persistentMessages
                     };
                     var expectedVersion = pendingWrite.ExpectedSequenceId < 0
-                            ? ExpectedVersion.NoStream
-                            : (int) pendingWrite.ExpectedSequenceId;
-
-                    await _conn.AppendToStreamAsync(pendingWrite.StreamId, expectedVersion, pendingWrite.EventData);
-                    results.Add(null);
+                        ? StreamRevision.None
+                        : StreamRevision.FromInt64(pendingWrite.ExpectedSequenceId);
+                    
+                    var result = await _conn.AppendToStreamAsync(pendingWrite.StreamId, expectedVersion, pendingWrite.EventData);
+                    results = results.Add(null);
+                }
+                catch (WrongExpectedVersionException)
+                {
+                    throw;
                 }
                 catch (Exception e)
                 {
-                    results.Add(TryUnwrapException(e));
+                    results = results.Add(TryUnwrapException(e));
                 }
             }
 
-            return results.ToImmutableList();
+            return results;
         }
 
         protected override async Task DeleteMessagesToAsync(string persistenceId, long toSequenceNr)
         {
             if (toSequenceNr == long.MaxValue)
             {
-                var slice = await _conn.ReadStreamEventsBackwardAsync(persistenceId, StreamPosition.End, 1, false);
-                if (slice.Events.Any())
+                var @event = await _conn.ReadStreamAsync(Direction.Backwards, persistenceId, StreamPosition.End, 1, resolveLinkTos: false).FirstOrDefaultAsync();
+                if (@event.Event != null)
                 {
-                    var @event = slice.Events.First();
-                    var highestEventPosition = @event.OriginalEventNumber;
-                    await _conn.SetStreamMetadataAsync(persistenceId, ExpectedVersion.Any,
-                        StreamMetadata.Create(truncateBefore: highestEventPosition + 1));
+                    var highestEventPosition = @event.OriginalEventNumber.ToUInt64();
+                    await _conn.SetStreamMetadataAsync(persistenceId, StreamState.Any,
+                        new StreamMetadata(truncateBefore: highestEventPosition + 1));
                 }
             }
             else
             {
-                await _conn.SetStreamMetadataAsync(persistenceId, ExpectedVersion.Any,
-                    StreamMetadata.Create(truncateBefore: toSequenceNr));
+                await _conn.SetStreamMetadataAsync(persistenceId, StreamState.Any,
+                    new StreamMetadata(truncateBefore: StreamPosition.Start + (ulong)toSequenceNr),
+                    opt => opt.ThrowOnAppendFailure = true);
             }
         }
 
         protected override bool ReceivePluginInternal(object message)
         {
             return message.Match()
-                          .With<ReplayTaggedMessages>(StartTaggedSubscription)
-                          .With<SubscribePersistenceId>(StartPersistenceIdSubscription)
-                          .With<SubscribeAllPersistenceIds>(SubscribeAllPersistenceIdsHandler)
-                          .With<Unsubscribe>(RemoveSubscriber)
-                          .WasHandled;
-        }
-
-        private void StartPersistenceIdSubscription(SubscribePersistenceId sub)
-        {
-            // Sequence numbers are Akka issued, 1-based, convert to 0-based exclusive EventStore offsets
-            long? offset = sub.FromSequenceNr == 0 ? (long?) null : (sub.FromSequenceNr - 1);
-            _subscriptions.Subscribe(Sender, sub.PersistenceId, offset, sub.Max, e =>
-            {
-                var p = _eventAdapter.Adapt(e);
-                return p!= null ? new ReplayedMessage(p) : null;
-            });
-        }
-
-        private void SubscribeAllPersistenceIdsHandler(SubscribeAllPersistenceIds msg)
-        {
-            _subscriptions.Subscribe(Sender, "$streams", null, 500, e => _eventAdapter.Adapt(e));
-        }
-
-
-        private void StartTaggedSubscription(ReplayTaggedMessages msg)
-        {
-            _subscriptions.Subscribe(
-                Sender,
-                msg.Tag,
-                msg.FromOffset,
-                (int) msg.Max,
-                @event => new ReplayedTaggedMessage(
-                    _eventAdapter.Adapt(@event),
-                    msg.Tag,
-                    @event.Link?.EventNumber ?? @event.OriginalEventNumber)
-            );
-        }
-
-
-        private void RemoveSubscriber(Unsubscribe msg)
-        {
-            _subscriptions.Unsubscribe(msg.StreamId, msg.Subscriber);
+                .With<GetJournalConfig>(() =>
+                {
+                    Sender.Tell(new GetJournalConfigResult { Settings = _settings, EventAdapter = _eventAdapter });
+                })
+                .WasHandled;
         }
     }
 }

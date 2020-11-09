@@ -1,8 +1,7 @@
 ﻿using Docker.DotNet;
 using Docker.DotNet.Models;
-using EventStore.ClientAPI;
-using EventStore.ClientAPI.Projections;
-using EventStore.ClientAPI.SystemData;
+using EventStore.Client;
+using ES = EventStore.Client;
 using Microsoft.Extensions.Configuration;
 using System;
 using System.Collections.Generic;
@@ -85,6 +84,8 @@ namespace Akka.Persistence.EventStore.Tests
                         Tty = true,
                         Env = new List<string>
                         {
+                            "EVENTSTORE_INSECURE=true",
+                            "EVENTSTORE_CLUSTER_SIZE=1",
                             "EVENTSTORE_RUN_PROJECTIONS=All",
                             "EVENTSTORE_START_STANDARD_PROJECTIONS=True",
                             "EVENTSTORE_MEM_DB=1"
@@ -119,23 +120,23 @@ namespace Akka.Persistence.EventStore.Tests
                 // Starting the container ...
                 await _client.Containers.StartContainerAsync(_eventStoreContainerName,
                     new ContainerStartParameters { });
-                ConnectionString = $"ConnectTo=tcp://admin:changeit@localhost:{tcpPort}; HeartBeatTimeout=500";
+                ConnectionString = $"esdb://localhost:{_httpPort}?tls=false";
                 await Task.Delay(5000);
-                await InitializeProjections(_httpPort);
+                await InitializeProjections();
             }
             else
             {
-                ConnectionString = $"ConnectTo=tcp://admin:changeit@localhost:1113; HeartBeatTimeout=500";
-                await InitializeProjections(2113);
+                ConnectionString = $"esdb://localhost:12113?tls=false";
+                await InitializeProjections();
             }
         }
 
-        public DatabaseFixture Restart()
+        public async Task<DatabaseFixture> Restart()
         {
             if (_restartCount++ == 0) return this; // Don't restart the first time
-            _client.Containers.RestartContainerAsync(_eventStoreContainerName, new ContainerRestartParameters { WaitBeforeKillSeconds = 0 }).Wait();
-            Task.Delay(5000).Wait();
-            InitializeProjections(_httpPort).Wait();
+            await _client.Containers.RestartContainerAsync(_eventStoreContainerName, new ContainerRestartParameters { WaitBeforeKillSeconds = 0 });
+            await Task.Delay(6000);
+            await InitializeProjections();
             return this;
         }
 
@@ -159,47 +160,32 @@ namespace Akka.Persistence.EventStore.Tests
             }
         }
 
-        private Task InitializeProjections(int httpPort)
+        private async Task InitializeProjections()
         {
-       
-            var logger = new NoLogger();
-            var endpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), httpPort);
-            var pm = new ProjectionsManager(logger, endpoint, TimeSpan.FromSeconds(2));
+            var settings = EventStoreClientSettings.Create(ConnectionString);
+            // settings.DefaultCredentials = new UserCredentials("admin", "changeit");
 
-            return Task.WhenAll(Tags.Select(async tag =>
+            var pm = new EventStoreProjectionManagementClient(settings);
+
+            var existings = await pm.ListContinuousAsync()
+                .Select(p => p.Name)
+                .ToListAsync();
+
+            foreach (var tag in Tags.Where(t => !existings.Contains(t)))
             {
                 var source = ReadTaggedProjectionSource(tag);
-                await pm.CreateContinuousAsync(tag, source, new UserCredentials("admin", "changeit"));
-            }));
-            
-        }
-
-        private class NoLogger : ILogger
-        {
-            public void Error(string format, params object[] args)
-            {
-            }
-
-            public void Error(Exception ex, string format, params object[] args)
-            {
-            }
-
-            public void Info(string format, params object[] args)
-            {
-            }
-
-            public void Info(Exception ex, string format, params object[] args)
-            {
-            }
-
-            public void Debug(string format, params object[] args)
-            {
-            }
-
-            public void Debug(Exception ex, string format, params object[] args)
-            {
+                try
+                {
+                    await pm.CreateContinuousAsync(tag, source);
+                    await pm.UpdateAsync(tag, source, emitEnabled: true);
+                }
+                catch (Exception ex)
+                {
+                    throw ex;
+                }
             }
         }
+
 
         private string ReadTaggedProjectionSource(string tag)
         {

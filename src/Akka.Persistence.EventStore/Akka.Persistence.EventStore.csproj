@@ -1,8 +1,8 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 	<Import Project="..\common.props" />
 	<PropertyGroup>
-		<TargetFrameworks>net452;netstandard2.0</TargetFrameworks>
-		<LangVersion>7.1</LangVersion>
+		<TargetFrameworks>netstandard2.1</TargetFrameworks>
+		<LangVersion>latest</LangVersion>
 	</PropertyGroup>
 	<PropertyGroup>
 		<AssemblyTitle>Akka.Persistence.EventStore</AssemblyTitle>
@@ -10,6 +10,9 @@
 		<PackageTags>akka;actors;actor model;Akka;concurrency;persistence;eventsource;eventstore</PackageTags>
 		<GenerateDocumentationFile>false</GenerateDocumentationFile>
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Version>1.4.16-beta1</Version>
 	</PropertyGroup>
 
 
@@ -18,22 +21,14 @@
 	</ItemGroup>
 	<ItemGroup>
 		<PackageReference Include="Akka" Version="$(AkkaVersion)" />
+    <PackageReference Include="Akka.Streams" Version="$(AkkaVersion)" />
 		<PackageReference Include="Akka.Persistence" Version="$(AkkaVersion)" />
-	</ItemGroup>
+    <PackageReference Include="EventStore.Client.Grpc" Version="$(EventStoreVersion)" />
+    <PackageReference Include="EventStore.Client.Grpc.Streams" Version="$(EventStoreVersion)" />
+    <PackageReference Include="EventStore.Client.Grpc.PersistentSubscriptions" Version="$(EventStoreVersion)" />
+  </ItemGroup>
 
-	<ItemGroup Condition=" '$(TargetFramework)' == 'net452' ">
-		<PackageReference Include="EventStore.Client" Version="5.*" />
-	</ItemGroup>
-
-	<ItemGroup Condition=" '$(TargetFramework)' == 'netstandard2.0' ">
-		<PackageReference Include="EventStore.Client" Version="5.*" />
-	</ItemGroup>
-
-	<PropertyGroup Condition=" '$(TargetFramework)' == 'net452' ">
-		<DefineConstants>$(DefineConstants);SERIALIZATION</DefineConstants>
-	</PropertyGroup>
-
-	<PropertyGroup Condition=" '$(TargetFramework)' == 'netstandard2.0' ">
+	<PropertyGroup Condition=" '$(TargetFramework)' == 'netstandard2.1' ">
 		<DefineConstants>$(DefineConstants);CORECLR</DefineConstants>
 	</PropertyGroup>
 

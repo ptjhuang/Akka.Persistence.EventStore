@@ -89,6 +89,13 @@ namespace Akka.Persistence.EventStore.Query
         public static CaughtUp Instance => new CaughtUp();
     }
 
+    public sealed class GetJournalConfig : IJournalRequest { }
+    public sealed class GetJournalConfigResult
+    {
+        public EventStoreJournalSettings Settings { get; set; }
+        public IEventAdapter EventAdapter { get; set; }
+    }
+
     /// <summary>
     /// Commands journal to reply tagged messages.
     /// </summary>
