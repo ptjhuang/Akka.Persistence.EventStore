@@ -1,7 +1,13 @@
 using Akka.Configuration;
-using Akka.Persistence.Query;
 using Akka.Persistence.EventStore.Query;
+using Akka.Persistence.Query;
 using Akka.Persistence.TCK.Query;
+using Akka.Streams.TestKit;
+using Akka.Util.Internal;
+using Reactive.Streams;
+using System;
+using System.Reflection;
+using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -29,11 +35,21 @@ namespace Akka.Persistence.EventStore.Tests.Query
                 }}
                 akka.test.single-expect-default = 10s").WithFallback(EventStoreReadJournal.DefaultConfiguration());
         }
-        
-        [Fact(Skip = "Must be run individually since events cannot be deleted from EventStore.")]
+
+        [Fact(Skip = "Must be run individually since tests uses projections, and they interfere with one another")]
         public override void ReadJournal_AllPersistenceIds_should_deliver_persistenceId_only_once_if_there_are_multiple_events()
         {
             base.ReadJournal_AllPersistenceIds_should_deliver_persistenceId_only_once_if_there_are_multiple_events();
         }
+
+        [Fact(Skip = "Must be run individually since tests uses projections, and they interfere with one another")]
+        public override void ReadJournal_AllPersistenceIds_should_find_new_events()
+        {
+            base.ReadJournal_AllPersistenceIds_should_deliver_persistenceId_only_once_if_there_are_multiple_events();
+        }
+
+        protected override bool AllocatesAllPersistenceIDsPublisher => false;
+
     }
+
 }

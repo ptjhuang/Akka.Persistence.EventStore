@@ -20,6 +20,9 @@
             /// <see cref="IPersistentRepresentation.WriterGuid"/>
             /// </summary>
             public const string WriterGuid = "writerGuid";
+            /// <summary>
+            /// <see cref="IPersistentRepresentation.Timestamp"/>
+            /// </summary>
             public const string Timestamp = "timestamp";
             public const string JournalType = "journalType";
         }

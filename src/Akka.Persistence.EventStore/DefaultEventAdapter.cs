@@ -35,6 +35,7 @@ namespace Akka.Persistence.EventStore
             metadata[Constants.EventMetadata.Manifest] = persistentMessage.Manifest;
             metadata[Constants.EventMetadata.SequenceNr] = persistentMessage.SequenceNr;
             metadata[Constants.EventMetadata.WriterGuid] = persistentMessage.WriterGuid;
+            metadata[Constants.EventMetadata.Timestamp] = persistentMessage.Timestamp;
             metadata[Constants.EventMetadata.JournalType] = Constants.JournalTypes.WriteJournal;
             if (persistentMessage.Sender != null) metadata[Constants.EventMetadata.SenderPath] = Akka.Serialization.Serialization.SerializedActorPath(persistentMessage.Sender);
 
@@ -92,8 +93,10 @@ namespace Akka.Persistence.EventStore
             var persistenceId = (string)metadata.SelectToken(Constants.EventMetadata.PersistenceId);
             var manifest = (string)metadata.SelectToken(Constants.EventMetadata.Manifest);
             var sequenceNr = (long)metadata.SelectToken(Constants.EventMetadata.SequenceNr);
+            // var sequenceNr = resolvedEvent.OriginalEventNumber.ToInt64();
             var senderPath = (string)metadata.SelectToken(Constants.EventMetadata.SenderPath);
             var writerGuid = (string)metadata.SelectToken(Constants.EventMetadata.WriterGuid);
+            var timestamp = (long)metadata.SelectToken(Constants.EventMetadata.Timestamp);
 
             IActorRef sender = ActorRefs.NoSender;
             if (senderPath != null)
@@ -108,7 +111,8 @@ namespace Akka.Persistence.EventStore
                 manifest,
                 false,
                 sender,
-                writerGuid);
+                writerGuid,
+                timestamp);
         }
 
         /// <summary>

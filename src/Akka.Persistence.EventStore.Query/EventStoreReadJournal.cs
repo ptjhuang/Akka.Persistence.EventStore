@@ -284,7 +284,7 @@ namespace Akka.Persistence.EventStore.Query
             var eventOffset = Offset.Sequence(position);
             var persistentRep = _eventAdapter.Adapt(@event);
             if (persistentRep == null) return default;
-            var envelope = new EventEnvelope(eventOffset, persistentRep.PersistenceId, persistentRep.SequenceNr, persistentRep.Payload);
+            var envelope = new EventEnvelope(eventOffset, persistentRep.PersistenceId, persistentRep.SequenceNr, persistentRep.Payload, persistentRep.Timestamp);
             return (envelope, position);
         }
     }

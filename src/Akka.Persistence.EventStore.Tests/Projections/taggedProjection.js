@@ -6,7 +6,7 @@ options({ //option
 fromAll()
     .when({
         $init: function (s, e) {
-            return {streams: ["a", "b", "c", "d", "f", "g", "h"]};
+            return { streams: ["a", "b", "c", "d", "f", "g", "h", "testTimestamp"]};
         },
         "string": function (s, e) {
             if (s.streams.includes(e.streamId) && e.data)

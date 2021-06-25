@@ -26,7 +26,7 @@ namespace Akka.Persistence.EventStore.Tests
         private DockerClient _client;
         private readonly string _eventStoreContainerName = $"es-{Guid.NewGuid():N}";
         private static readonly Random Random;
-        const string EventStoreImage = "eventstore/eventstore";
+        const string EventStoreImage = "eventstore/eventstore:20.6.1-bionic";
         private int _restartCount = 0;
         private int _httpPort;
 
@@ -88,7 +88,8 @@ namespace Akka.Persistence.EventStore.Tests
                             "EVENTSTORE_CLUSTER_SIZE=1",
                             "EVENTSTORE_RUN_PROJECTIONS=All",
                             "EVENTSTORE_START_STANDARD_PROJECTIONS=True",
-                            "EVENTSTORE_MEM_DB=1"
+                            "EVENTSTORE_MEM_DB=1",
+                            "EVENTSTORE_ENABLE_ATOM_PUB_OVER_HTTP=True"
                         },
                         HostConfig = new HostConfig
                         {

@@ -70,7 +70,8 @@ namespace Akka.Persistence.EventStore.Query.Publishers
                     new Sequence(replayed.Persistent.SequenceNr),
                     _persistenceId,
                     replayed.Persistent.SequenceNr,
-                    replayed.Persistent.Payload
+                    replayed.Persistent.Payload,
+                    replayed.Persistent.Timestamp
                 ));
                 _currentOffset = replayed.Persistent.SequenceNr;
             }

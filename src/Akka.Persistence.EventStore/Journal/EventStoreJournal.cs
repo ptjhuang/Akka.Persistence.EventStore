@@ -211,7 +211,9 @@ namespace Akka.Persistence.EventStore.Journal
                 try
                 {
                     var events = persistentMessages
-                                 .Select(persistentMessage => _eventAdapter.Adapt(persistentMessage)).ToArray();
+                        .Select(persistentMessage => 
+                            _eventAdapter.Adapt(persistentMessage.WithTimestamp(DateTime.UtcNow.Ticks)))
+                        .ToArray();
 
                     var pendingWrite = new
                     {
@@ -223,7 +225,7 @@ namespace Akka.Persistence.EventStore.Journal
                     var expectedVersion = pendingWrite.ExpectedSequenceId < 0
                         ? StreamRevision.None
                         : StreamRevision.FromInt64(pendingWrite.ExpectedSequenceId);
-                    
+
                     var result = await _conn.AppendToStreamAsync(pendingWrite.StreamId, expectedVersion, pendingWrite.EventData);
                     results = results.Add(null);
                 }
